@@ -1,0 +1,18 @@
+[project]
+name = "vetagent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "crewai[tools]>=0.186.1",
+    "fastapi>=0.116.1",
+    "matplotlib>=3.10.6",
+    "openai>=1.107.1",
+    "python-dotenv>=1.1.1",
+    "python-multipart>=0.0.20",
+    "streamlit>=1.49.1",
+    "streamlit-webrtc>=0.63.4",
+    "twilio>=9.8.0",
+    "uvicorn>=0.35.0",
+]
