@@ -34,28 +34,60 @@ def display_call_summary(call_sid):
         state_data = state_response.json()
         
         with state_placeholder.container():
-            st.metric("Conversation Stage", state_data.get('stage', 'N/A').replace('_', ' ').capitalize())
+            stage = state_data.get('stage', 'N/A').replace('_', ' ').capitalize()
+            st.metric("Conversation Stage", stage)
+            
+            # Show progress based on stage
+            stages = ["Greeting", "Collecting guardian", "Collecting pet details", 
+                     "Collecting appointment", "Confirming", "Concluded"]
+            current_index = stages.index(stage) if stage in stages else 0
+            st.progress((current_index + 1) / len(stages))
 
         with pet_details_placeholder.container():
             details = state_data.get('details_collected', {})
-            confirmed_status = "✅ Confirmed" if details.get('appointment_confirmed') else "⏳ Pending"
+            confirmed_status = "✅ Confirmed" if stage in ["Confirming", "Concluded"] else "⏳ Pending"
 
-            # Only show fields that have values
-            if details.get('guardian_name'):
-                st.write(f"**Guardian:** {details.get('guardian_name')}")
-            if details.get('pet_name'):
-                st.write(f"**Pet Name:** {details.get('pet_name')}")
-            if details.get('pet_species'):
-                st.write(f"**Species:** {details.get('pet_species')}")
-            if details.get('pet_breed'):
-                st.write(f"**Breed:** {details.get('pet_breed')}")
-            if details.get('pet_dob'):
-                st.write(f"**DOB/Age:** {details.get('pet_dob')}")
-            if details.get('appointment_date'):
-                appointment_text = details.get('appointment_date')
-                if details.get('appointment_time'):
-                    appointment_text += f" at {details.get('appointment_time')}"
-                st.write(f"**Appointment:** {appointment_text}")
+            st.subheader("🐾 Collected Details")
+
+            st.subheader("🐾 Collected Details")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if details.get('guardian_name'):
+                    st.success(f"**Guardian:** {details.get('guardian_name')}")
+                else:
+                    st.info("**Guardian:** Not collected")
+                
+                if details.get('pet_name'):
+                    st.success(f"**Pet Name:** {details.get('pet_name')}")
+                else:
+                    st.info("**Pet Name:** Not collected")
+                
+                if details.get('pet_species'):
+                    st.success(f"**Species:** {details.get('pet_species')}")
+                else:
+                    st.info("**Species:** Not collected")
+            
+            with col2:
+                if details.get('pet_breed'):
+                    st.success(f"**Breed:** {details.get('pet_breed')}")
+                else:
+                    st.info("**Breed:** Not collected")
+                
+                if details.get('pet_dob'):
+                    st.success(f"**DOB/Age:** {details.get('pet_dob')}")
+                else:
+                    st.info("**DOB/Age:** Not collected")
+                
+                if details.get('appointment_date'):
+                    appointment_text = details.get('appointment_date')
+                    if details.get('appointment_time'):
+                        appointment_text += f" at {details.get('appointment_time')}"
+                    st.success(f"**Appointment:** {appointment_text}")
+                else:
+                    st.info("**Appointment:** Not scheduled")
+            
             st.write(f"**Status:** {confirmed_status}")
 
 

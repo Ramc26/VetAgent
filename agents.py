@@ -42,6 +42,12 @@ llm = ChatOpenAI(
     temperature=0.8  # Higher temperature for more creative, natural responses
 )
 
+llm2 = ChatOpenAI(
+    model="gpt-4o",
+    api_key=openai_api_key,
+    temperature=0.1  # Lower temperature for more precise extraction
+)
+
 vet_appointment_agent = Agent(
     role="Friendly Veterinary Appointment Coordinator",
     goal="""Have natural, warm conversations with pet guardians to confirm appointment details.
@@ -56,4 +62,18 @@ vet_appointment_agent = Agent(
     allow_delegation=False,
     max_iter=2,
     memory=True
+)
+
+data_extraction_agent = Agent(
+    role="Data Extraction and State Tracking Specialist",
+    goal="""Analyze conversations to extract pet and appointment details accurately and track conversation state.
+    Identify guardian name, pet name, species, breed, date of birth, appointment date and time.
+    Determine the current stage of the conversation based on what information has been collected.""",
+    backstory="""You are a highly accurate data extraction system specialized in veterinary appointment conversations.
+    You meticulously analyze dialogue to extract structured information and track the progression of conversations.
+    Your precision ensures that no details are missed and the conversation flows smoothly through all necessary stages.""",
+    llm=llm2,
+    verbose=True,
+    allow_delegation=False,
+    max_iter=1
 )

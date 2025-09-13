@@ -54,6 +54,11 @@ async def voice_webhook(CallSid: str = Form(...), SpeechResult: str = Form(None)
     if SpeechResult:
         conversation_manager.update_conversation(CallSid, "customer", SpeechResult)
     
+    # Check for confirmation in the customer's response
+    if SpeechResult and any(word in SpeechResult.lower() for word in ["yes", "confirm", "correct", "that's right"]):
+        state = conversation_manager.get_conversation_state(CallSid)
+        state["details_collected"]["appointment_confirmed"] = True
+    
     # Check if we should end the call first
     if conversation_manager.should_conclude(CallSid):
         response.say("Thank you for confirming all the details! We look forward to seeing you and your pet. Have a wonderful day!", voice='Polly.Joanna-Neural')
@@ -68,6 +73,10 @@ async def voice_webhook(CallSid: str = Form(...), SpeechResult: str = Form(None)
         return Response(content=str(response), media_type="application/xml")
     
     state = conversation_manager.get_conversation_state(CallSid)
+    details = state.get("details_collected", {})
+    
+    # Format details for the task
+    details_str = "\n".join([f"{k}: {v}" for k, v in details.items() if v])
     
     appointment_crew = Crew(
         agents=[vet_appointment_agent],
@@ -79,7 +88,8 @@ async def voice_webhook(CallSid: str = Form(...), SpeechResult: str = Form(None)
     crew_input = {
         "call_sid": CallSid,
         "conversation_context": conversation_manager.get_conversation_context(CallSid),
-        "details_collected": state.get("details_collected", {})
+        "details_collected": details_str,
+        "conversation_stage": state.get("stage", "greeting")
     }
 
     crew_result = appointment_crew.kickoff(inputs=crew_input)

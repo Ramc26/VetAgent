@@ -1,91 +1,19 @@
-# class ConversationManager:
-#     def __init__(self):
-#         self.conversations = {}
-#         self.conversation_states = {}
-#         self.covered_topics = {}
-    
-#     def initialize_conversation(self, call_sid):
-#         self.conversations[call_sid] = [
-#             {"role": "system", "content": "You are Alex from Sunny Meadows Veterinary Hospital. Start by introducing yourself and asking about their overall experience."}
-#         ]
-#         self.conversation_states[call_sid] = {
-#             "stage": "introduction",
-#             "topics_covered": set(),
-#             "question_count": 0,
-#             "customer_satisfaction": "neutral"
-#         }
-    
-#     def update_conversation(self, call_sid, role, content):
-#         if call_sid not in self.conversations:
-#             self.initialize_conversation(call_sid)
-        
-#         self.conversations[call_sid].append({"role": role, "content": content})
-        
-#         # Update conversation state based on content
-#         if role == "customer":
-#             self._update_state_based_on_response(call_sid, content)
-    
-#     def _update_state_based_on_response(self, call_sid, response):
-#         state = self.conversation_states[call_sid]
-#         state["question_count"] += 1
-        
-#         # Detect topics mentioned in customer response
-#         response_lower = response.lower()
-#         topics_to_check = [
-#             ("check-in", "checkin", "reception", "front desk"),
-#             ("wait", "time", "waiting"),
-#             ("vet", "doctor", "veterinarian", "examination"),
-#             ("instructions", "advice", "prescription", "medication"),
-#             ("overall", "experience", "satisfied", "happy")
-#         ]
-        
-#         for topic_keywords in topics_to_check:
-#             if any(keyword in response_lower for keyword in topic_keywords):
-#                 state["topics_covered"].add(topic_keywords[0])
-        
-#         # Detect satisfaction level
-#         if any(word in response_lower for word in ["good", "great", "excellent", "wonderful", "happy", "satisfied"]):
-#             state["customer_satisfaction"] = "positive"
-#         elif any(word in response_lower for word in ["bad", "poor", "terrible", "disappointed", "unhappy"]):
-#             state["customer_satisfaction"] = "negative"
-    
-#     def get_conversation_context(self, call_sid):
-#         if call_sid not in self.conversations:
-#             return ""
-        
-#         # Limit conversation history to avoid token overflow
-#         recent_messages = self.conversations[call_sid][-6:]  # Last 3 exchanges
-#         return "\n".join([f"{msg['role']}: {msg['content']}" for msg in recent_messages])
-    
-#     def get_conversation_state(self, call_sid):
-#         return self.conversation_states.get(call_sid, {
-#             "stage": "introduction",
-#             "topics_covered": set(),
-#             "question_count": 0,
-#             "customer_satisfaction": "neutral"
-#         })
-    
-#     def should_conclude(self, call_sid):
-#         state = self.get_conversation_state(call_sid)
-        
-#         # Conclude if we've asked enough questions or covered main topics
-#         if (state["question_count"] >= 5 or 
-#             len(state["topics_covered"]) >= 3 or
-#             state["stage"] == "conclusion"):
-#             return True
-        
-#         return False
-
-# # Global instance
-# conversation_manager = ConversationManager()
-# #working code
 import re
-from datetime import datetime
+import json
+from crewai import Crew, Process
+from agents import data_extraction_agent
+from tasks import data_extraction_task
 
 class ConversationManager:
     def __init__(self):
         self.conversations = {}
         self.conversation_states = {}
+        self.data_extraction_crew = Crew(
+            agents=[data_extraction_agent],
+            tasks=[data_extraction_task],
+            process=Process.sequential,
+            verbose=False
+        )
 
     def initialize_conversation(self, call_sid):
         self.conversations[call_sid] = []
@@ -101,9 +29,7 @@ class ConversationManager:
                 "appointment_time": "",
                 "appointment_confirmed": False
             },
-            "confirmed_details": set(),
-            "question_count": 0,
-            "last_question": ""
+            "question_count": 0
         }
 
     def update_conversation(self, call_sid, role, content):
@@ -113,160 +39,174 @@ class ConversationManager:
         self.conversations[call_sid].append({"role": role, "content": content})
         
         if role == "customer":
-            self._extract_details_from_response(call_sid, content)
-            self._update_state_based_on_response(call_sid, content)
-        elif role == "agent":
-            # Store the last question asked by agent
-            state = self.conversation_states[call_sid]
-            state["last_question"] = content
+            self._extract_details_with_agent(call_sid)
 
-    def _extract_details_from_response(self, call_sid, response):
-        state = self.conversation_states[call_sid]
-        response_lower = response.lower()
+    def _extract_details_with_agent(self, call_sid):
+        """Use the data extraction agent to analyze the conversation and extract details"""
+        try:
+            crew_input = {
+                "conversation_context": self.get_conversation_context(call_sid),
+                "current_details": str(self.conversation_states[call_sid]["details_collected"])
+            }
+
+            extraction_result = self.data_extraction_crew.kickoff(inputs=crew_input)
+            
+            # Try to parse the JSON response
+            try:
+                # Clean the response to extract just the JSON part
+                response_text = extraction_result.raw.strip()
+                
+                # Handle different JSON response formats
+                if '```json' in response_text:
+                    json_str = response_text.split('```json')[1].split('```')[0].strip()
+                elif '```' in response_text:
+                    json_str = response_text.split('```')[1].split('```')[0].strip()
+                elif response_text.startswith('{') and response_text.endswith('}'):
+                    json_str = response_text
+                else:
+                    # Try to find JSON object in the text
+                    json_match = re.search(r'\{[\s\S]*\}', response_text)
+                    if json_match:
+                        json_str = json_match.group()
+                    else:
+                        raise ValueError("No JSON found in response")
+                
+                extracted_data = json.loads(json_str)
+                
+                # Validate the extracted data
+                self._validate_extracted_data(extracted_data)
+                
+            except (json.JSONDecodeError, ValueError) as e:
+                print(f"JSON parsing failed: {e}")
+                raise ValueError("Invalid JSON response from extraction agent")
+            
+            # Update details collected
+            current_details = self.conversation_states[call_sid]["details_collected"]
+            extracted_details = extracted_data.get("extracted_details", {})
+            
+            for key, value in extracted_details.items():
+                if value and value.strip() and value.strip() != "empty":
+                    # Special validation for names to prevent mixing guardian and pet names
+                    if key == "guardian_name" and value == current_details.get("pet_name"):
+                        continue  # Don't overwrite pet name with guardian name
+                    if key == "pet_name" and value == current_details.get("guardian_name"):
+                        continue  # Don't overwrite guardian name with pet name
+                    
+                    current_details[key] = value.strip()
+            
+            # Update conversation stage
+            new_stage = extracted_data.get("conversation_stage")
+            if new_stage and new_stage in ["greeting", "collecting_guardian", "collecting_pet_details", 
+                                         "collecting_appointment", "confirming", "concluded"]:
+                self.conversation_states[call_sid]["stage"] = new_stage
+            
+        except Exception as e:
+            print(f"Error in data extraction: {e}")
+            # Fallback to improved extraction if AI extraction fails
+            self._improved_fallback_extraction(call_sid)
+
+    def _validate_extracted_data(self, extracted_data):
+        """Validate that the extracted data makes sense"""
+        details = extracted_data.get("extracted_details", {})
         
-        # Extract guardian name
-        if not state["details_collected"]["guardian_name"]:
-            name_patterns = [
-                r"my name is (\w+)",
-                r"it'?s (\w+)",
+        # Guardian and pet names should not be the same
+        if (details.get("guardian_name") and details.get("pet_name") and 
+            details.get("guardian_name").lower() == details.get("pet_name").lower()):
+            raise ValueError("Guardian and pet names cannot be the same")
+        
+        # Species should be simple animal types
+        species = details.get("pet_species", "").lower()
+        if species and species not in ["dog", "cat", "bird", "rabbit", "hamster", "fish", "reptile"]:
+            # If it's a complex species, it might actually be a breed
+            if details.get("pet_breed"):
+                # If we already have a breed, this might be an error
+                raise ValueError(f"Invalid species: {species}")
+    
+    def _improved_fallback_extraction(self, call_sid):
+        """Improved fallback extraction with better pattern matching"""
+        state = self.conversation_states[call_sid]
+        conversation = self.conversations.get(call_sid, [])
+        
+        # Analyze the entire conversation for better context
+        full_text = " ".join([msg["content"] for msg in conversation if msg["role"] == "customer"])
+        full_text_lower = full_text.lower()
+        
+        # Improved patterns with better context awareness
+        patterns = {
+            "guardian_name": [
+                r"my name is (\w+)", 
+                r"it'?s (\w+)", 
                 r"i'?m (\w+)",
                 r"this is (\w+)",
-                r"you can call me (\w+)"
-            ]
-            
-            for pattern in name_patterns:
-                match = re.search(pattern, response_lower)
-                if match:
-                    state["details_collected"]["guardian_name"] = match.group(1).capitalize()
-                    break
-        
-        # Extract pet name
-        if not state["details_collected"]["pet_name"]:
-            pet_name_patterns = [
-                r"pet'?s name is (\w+)",
-                r"name is (\w+)",
+                r"you can call me (\w+)",
+                r"call me (\w+)"
+            ],
+            "pet_name": [
+                r"pet'?s name is (\w+)", 
+                r"name is (\w+)", 
                 r"call (?:him|her|it) (\w+)",
-                r"(\w+) is the name"
+                r"(\w+) is (?:my|the) (?:pet|dog|cat)",
+                r"(\w+)'s (?:appointment|visit)"
+            ],
+            "pet_species": [
+                r"it'?s a (\w+)", 
+                r"species is (\w+)", 
+                r"(\bdog\b|\bcat\b|\bbird\b|\bfish\b|\bhamster\b|\brabbit\b)",
+                r"she'?s a (\w+)",
+                r"he'?s a (\w+)"
+            ],
+            "pet_breed": [
+                r"breed is ([^.,!?]*)", 
+                r"(\w+(?:\s+\w+)*) breed",
+                r"she'?s a ([^.,!?]*)",
+                r"he'?s a ([^.,!?]*)",
+                r"(\bGerman Shepherd\b|\bGolden Retriever\b|\bLabrador\b|\bBengal\b|\bSiamese\b|\bPersian\b)"
+            ],
+            "pet_dob": [
+                r"date of birth is ([^.,!?]*)", 
+                r"dob is ([^.,!?]*)", 
+                r"born on ([^.,!?]*)",
+                r"(\d+ months? old)",
+                r"(\d+ years? old)",
+                r"age is (\d+)"
+            ],
+            "appointment_date": [
+                r"appointment is ([^.,!?]*)", 
+                r"schedule for ([^.,!?]*)",
+                r"(\w+ \d+(?:st|nd|rd|th))",
+                r"(\d+/\d+/\d+)",
+                r"([A-Za-z]+ \d+)"
+            ],
+            "appointment_time": [
+                r"at (\d{1,2}:\d{2}\s*(?:am|pm))", 
+                r"time is (\d{1,2}:\d{2}\s*(?:am|pm))",
+                r"(\d{1,2}\s*(?:am|pm))",
+                r"(\d{1,2}:\d{2})"
             ]
-            
-            for pattern in pet_name_patterns:
-                match = re.search(pattern, response_lower)
-                if match:
-                    state["details_collected"]["pet_name"] = match.group(1).capitalize()
-                    break
+        }
         
-        # Extract species
-        if not state["details_collected"]["pet_species"]:
-            species_patterns = [
-                r"it'?s a (\w+)",
-                r"species is (\w+)",
-                r"(\w+) breed",
-                r"(\bcat\b|\bdog\b|\bbird\b|\bfish\b|\bhamster\b|\brabbit\b)"
-            ]
-            
-            for pattern in species_patterns:
-                match = re.search(pattern, response_lower)
-                if match:
-                    state["details_collected"]["pet_species"] = match.group(1).capitalize()
-                    break
-        
-        # Extract breed
-        if not state["details_collected"]["pet_breed"]:
-            breed_patterns = [
-                r"breed is ([^.?!]*)",
-                r"(\w+)(?:\s+\w+)* breed",
-                r"it'?s a ([^.?!]*)(?=and|\.|$)"
-            ]
-            
-            for pattern in breed_patterns:
-                match = re.search(pattern, response_lower)
-                if match:
-                    breed = match.group(1).strip()
-                    if breed and not breed.isdigit():  # Filter out numbers
-                        state["details_collected"]["pet_breed"] = breed.capitalize()
-                    break
-        
-        # Extract date of birth
-        if not state["details_collected"]["pet_dob"]:
-            dob_patterns = [
-                r"date of birth is ([^.?!]*)",
-                r"dob is ([^.?!]*)",
-                r"born on ([^.?!]*)",
-                r"(\d+(?:th|st|nd|rd)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4})",
-                r"(\d{1,2}/\d{1,2}/\d{4})"
-            ]
-            
-            for pattern in dob_patterns:
-                match = re.search(pattern, response_lower)
-                if match:
-                    state["details_collected"]["pet_dob"] = match.group(1).capitalize()
-                    break
-        
-        # Extract appointment date and time
-        if not state["details_collected"]["appointment_date"]:
-            appointment_patterns = [
-                r"appointment is ([^.?!]*)",
-                r"schedule for ([^.?!]*)",
-                r"(\d+(?:th|st|nd|rd)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+at\s+\d{1,2}:\d{2}\s*(?:am|pm))",
-                r"(\d{1,2}/\d{1,2}/\d{4}\s+at\s+\d{1,2}:\d{2}\s*(?:am|pm))"
-            ]
-            
-            for pattern in appointment_patterns:
-                match = re.search(pattern, response_lower)
-                if match:
-                    appointment_info = match.group(1).capitalize()
-                    # Separate date and time if possible
-                    if " at " in appointment_info:
-                        date_part, time_part = appointment_info.split(" at ", 1)
-                        state["details_collected"]["appointment_date"] = date_part.strip()
-                        state["details_collected"]["appointment_time"] = time_part.strip()
-                    else:
-                        state["details_collected"]["appointment_date"] = appointment_info
-                    break
-
-    def _update_state_based_on_response(self, call_sid, response):
-        state = self.conversation_states[call_sid]
-        state["question_count"] += 1
-        response_lower = response.lower()
-
-        # Check for positive confirmation
-        is_positive_confirmation = any(word in response_lower for word in [
-            "yes", "correct", "that's right", "perfect", "sounds good", 
-            "yep", "right", "exactly", "confirmed", "go ahead"
-        ])
-        
-        # Check for negative response
-        is_negative = any(word in response_lower for word in [
-            "no", "not", "incorrect", "wrong", "change", "nope"
-        ])
-        
-        # Update stage based on response
-        if "last_question" in state:
-            last_q = state["last_question"].lower()
-            
-            if "name" in last_q and state["details_collected"]["guardian_name"]:
-                state["stage"] = "collecting_pet_details"
-            
-            elif ("pet" in last_q or "species" in last_q or "breed" in last_q or "dob" in last_q) and \
-                 (state["details_collected"]["pet_name"] and state["details_collected"]["pet_species"]):
-                state["stage"] = "collecting_appointment"
-            
-            elif "appointment" in last_q and state["details_collected"]["appointment_date"]:
-                state["stage"] = "confirming_details"
-            
-            elif "correct" in last_q or "confirm" in last_q:
-                if is_positive_confirmation:
-                    state["details_collected"]["appointment_confirmed"] = True
-                    state["stage"] = "conclusion"
-                elif is_negative:
-                    state["stage"] = "correcting_details"
+        for field, field_patterns in patterns.items():
+            if not state["details_collected"][field]:
+                for pattern in field_patterns:
+                    match = re.search(pattern, full_text_lower)
+                    if match:
+                        extracted_value = match.group(1).strip()
+                        
+                        # Additional validation
+                        if field == "guardian_name" and extracted_value == state["details_collected"].get("pet_name"):
+                            continue
+                        if field == "pet_name" and extracted_value == state["details_collected"].get("guardian_name"):
+                            continue
+                            
+                        state["details_collected"][field] = extracted_value.capitalize()
+                        break
 
     def get_conversation_context(self, call_sid):
         if call_sid not in self.conversations:
             return ""
         
-        recent_messages = self.conversations[call_sid][-6:]
-        return "\n".join([f"{msg['role']}: {msg['content']}" for msg in recent_messages])
+        # Get the full conversation history
+        return "\n".join([f"{msg['role']}: {msg['content']}" for msg in self.conversations[call_sid]])
     
     def get_conversation_state(self, call_sid):
         return self.conversation_states.get(call_sid, {})
@@ -276,13 +216,27 @@ class ConversationManager:
         if not state:
             return False
         
-        # Check if all details are confirmed and we're at conclusion stage
+        # Check if all essential details are collected and confirmed
         details = state.get("details_collected", {})
-        if (state.get("stage") == "conclusion" and 
-            details.get("appointment_confirmed")):
-            return True
-
-        return False
+        essential_details = [
+            details.get("guardian_name"),
+            details.get("pet_name"), 
+            details.get("pet_species"),
+            details.get("appointment_date")
+        ]
+        
+        # Check if the agent has said goodbye
+        last_agent_message = ""
+        if call_sid in self.conversations and self.conversations[call_sid]:
+            agent_messages = [msg["content"] for msg in self.conversations[call_sid] if msg["role"] == "agent"]
+            if agent_messages:
+                last_agent_message = agent_messages[-1].lower()
+        
+        goodbye_phrases = ["thank you", "goodbye", "have a great day", "look forward to seeing you"]
+        said_goodbye = any(phrase in last_agent_message for phrase in goodbye_phrases)
+        
+        # All essential details should be present and agent should have concluded
+        return (all(essential_details) and said_goodbye)
 
 # Global instance
 conversation_manager = ConversationManager()
